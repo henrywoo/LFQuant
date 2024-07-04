@@ -26,24 +26,6 @@ def generate_sub_book_t(
     return sub_book.float()
 
 
-def entropy_from_half_logits(
-    logits_half: torch.Tensor,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    a = tnf.softmax(logits_half, dim=-1)
-    k_ = torch.sum(torch.exp(logits_half), dim=-1, keepdim=True)
-    h_ = torch.sum(torch.exp(-logits_half), dim=-1, keepdim=True)
-    c_ = k_ + h_
-    m = a * k_ / c_
-    n = a * h_ / c_
-    log_m = torch.log(m)
-    log_n = torch.log(n)
-    e_m = -torch.sum(m * log_m, dim=-1)
-    e_n = -torch.sum(n * log_n, dim=-1)
-    e = e_m + e_n
-    q = torch.cat([torch.mean(m, dim=-2), torch.mean(n, dim=-2)], dim=-1)
-    return e, q
-
-
 class LFQ:
     def __init__(
         self,
@@ -87,14 +69,14 @@ class LFQ:
             self.book_t = book.float().t()
         elif self.d < self.mode_delimiter[1]:
             self.mode = LFQMode.X_BATCH
-            indices = torch.arange(self.k // 2, device=device)
-            self.half_book = (
+            indices = torch.arange(self.k, device=device)
+            book = (
                 indices.unsqueeze(-1)
                 .bitwise_right_shift(torch.arange(self.d - 1, -1, -1, device=device))
                 .remainder(2)
             )
-            self.half_book[self.half_book == 0] = -1
-            self.half_book = self.half_book.float()
+            book[book == 0] = -1
+            self.book_t = book.float().t()
         else:
             self.mode = LFQMode.BLOCK
             self.subbook_size = 2 ** (min(21, self.d) - 1)
@@ -113,15 +95,21 @@ class LFQ:
         num_splits = x.size(1) // self.x_split
         for i in range(num_splits):
             x_chunk = x[:, i * self.x_split : (i + 1) * self.x_split]
-            logits_half = x_chunk.float() @ self.half_book.t() / self.temperature
-            entropy, mp = entropy_from_half_logits(logits_half)
+            logits = x_chunk.float() @ self.book_t
+            l = logits / self.temperature
+            probs = tnf.softmax(l, -1)
+            log_probs = tnf.log_softmax(l + self.eps, -1)
+            entropy = -torch.sum(probs * log_probs, -1)
+            mean_probs = probs.mean(dim=tuple(range(probs.dim() - 1)))
             entro_mean += torch.sum(entropy, dim=-1) / x.size(-2)
-            self.mean_probs += mp
-        self.mean_probs = self.mean_probs / num_splits
+            self.mean_probs += mean_probs
+        self.mean_probs /= num_splits
+        if self.debug:
+            assert abs(self.mean_probs[0].sum().item()) < 1.1
         mean_entro = -torch.sum(
             self.mean_probs * torch.log(self.mean_probs + self.eps), -1
         )
-        return entro_mean, mean_entro
+        return entro_mean.mean(), mean_entro.mean()
 
     def calc_entro_vanilla(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         logits = x.float() @ self.book_t
@@ -167,14 +155,13 @@ class LFQ:
                     x, i, sub_book_t, entro_mean, mean_probs
                 )
         mean_entro = -torch.sum(mean_probs * torch.log(mean_probs + self.eps), -1)
-        return entro_mean, mean_entro
+        return entro_mean.mean(), mean_entro.mean()
 
     def run(
         self,
         x: torch.Tensor,
         return_indices: bool = False,
         training: bool = False,
-        return_batch_avg: bool = True,
     ) -> Tuple[
         torch.Tensor,
         Optional[torch.Tensor],
@@ -220,18 +207,14 @@ class LFQ:
             self.indices = (binary_result.float() @ powers_of_2).long()
         if self.debug:
             print(
-                f"D: {self.d} EMean: {entro_mean[0]:.2f}, MEntro: {mean_entro[0]:.2f}, ELoss: {entro_loss[0]:.2f}"
+                f"D: {self.d} EMean: {entro_mean:.2f}, MEntro: {mean_entro:.2f}, ELoss: {entro_loss:.2f}"
             )
-        if return_batch_avg:
-            return (
-                q,
-                entro_mean.mean(),
-                mean_entro.mean(),
-                entro_loss.mean(),
+        return (q,
+                entro_mean,
+                mean_entro,
+                entro_loss,
                 self.indices,
-                self.commit_loss.mean(),
-            )
-        return q, entro_mean, mean_entro, entro_loss, self.indices, self.commit_loss
+                self.commit_loss.mean())
 
 
 class TorchLFQ(Module):
@@ -253,7 +236,6 @@ class TorchLFQ(Module):
         self,
         x: torch.Tensor,
         return_indices: bool = False,
-        return_batch_avg: bool = True,
     ) -> Tuple[
         torch.Tensor,
         Optional[torch.Tensor],
@@ -262,4 +244,4 @@ class TorchLFQ(Module):
         Optional[torch.Tensor],
         Optional[torch.Tensor],
     ]:
-        return self.lfq.run(x, return_indices, self.training, return_batch_avg)
+        return self.lfq.run(x, return_indices, self.training)
