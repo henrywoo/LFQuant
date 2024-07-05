@@ -4,6 +4,8 @@ from torch.nn import Module
 from enum import Enum
 from typing import Tuple, Optional
 
+from codebook import book_entropy, generate_sub_book_t
+
 FZERO = torch.tensor(0.0)
 
 
@@ -11,19 +13,6 @@ class LFQMode(Enum):
     VANILLA = 1
     X_BATCH = 2
     BLOCK = 3
-
-
-def generate_sub_book_t(
-    d: int, start: int, end: int, device: torch.device
-) -> torch.Tensor:
-    sub_indices = torch.arange(start, end, device=device)
-    sub_book = (
-        sub_indices.unsqueeze(0)
-        .bitwise_right_shift(torch.arange(d - 1, -1, -1, device=device).unsqueeze(1))
-        .remainder(2)
-    )
-    sub_book[sub_book == 0] = -1
-    return sub_book.float()
 
 
 class LFQ:
@@ -112,15 +101,7 @@ class LFQ:
         return entro_mean.mean(), mean_entro.mean()
 
     def calc_entro_vanilla(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        logits = x.float() @ self.book_t
-        l = logits / self.temperature
-        probs = tnf.softmax(l, -1)
-        log_probs = tnf.log_softmax(l + self.eps, -1)
-        entropy = -torch.sum(probs * log_probs, -1)
-        entro_mean = torch.mean(entropy)
-        mean_probs = probs.mean(dim=tuple(range(probs.dim() - 1)))
-        mean_entro = -torch.sum(mean_probs * torch.log(mean_probs + self.eps))
-        return entro_mean, mean_entro
+        return book_entropy(x, self.book_t, self.eps)
 
     def _block(
         self,
