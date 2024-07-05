@@ -4,7 +4,7 @@ from torch.nn import Module
 from enum import Enum
 from typing import Tuple, Optional
 
-from codebook import book_entropy, generate_sub_book_t
+from .codebook import book_entropy, generate_sub_book_t
 
 FZERO = torch.tensor(0.0)
 
